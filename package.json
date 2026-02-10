@@ -1,0 +1,39 @@
+{
+    "name": "ironrdp-wasm",
+    "version": "1.0.0",
+    "description": "WebAssembly build of Marc-André Moreau's IronRDP library for web RDP clients",
+    "keywords": [
+        "rdp",
+        "ironrdp",
+        "wasm",
+        "js"
+    ],
+    "homepage": "https://github.com/electerm/ironrdp-wasm#readme",
+    "bugs": {
+        "url": "https://github.com/electerm/ironrdp-wasm/issues"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/electerm/ironrdp-wasm.git"
+    },
+    "license": "MIT",
+    "author": "Marc-André Moreau",
+    "type": "module",
+    "main": "pkg/rdp_client.js",
+    "module": "pkg/rdp_client.js",
+    "types": "pkg/rdp_client.d.ts",
+    "exports": {
+        ".": {
+            "import": "./pkg/rdp_client.js",
+            "require": "./pkg/rdp_client.js",
+            "types": "./pkg/rdp_client.d.ts"
+        }
+    },
+    "files": [
+        "pkg"
+    ],
+    "scripts": {
+        "build": "wasm-pack build --target web --out-dir pkg --release",
+        "example": "cd example && node server.js"
+    }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "rdp-client"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# WASM dependencies
+wasm-bindgen = "0.2"
+ironrdp-web = { git = "https://github.com/Devolutions/IronRDP.git", branch = "master" }
+web-sys = { version = "0.3", features = ["console"] }

@@ -1,0 +1,12 @@
+{
+    "name": "ironrdp-wasm-example",
+    "version": "1.0.0",
+    "description": "Example usage of ironrdp-wasm",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "express": "^4.21.0",
+        "express-ws": "^5.0.2"
+    }
+}
