@@ -1,6 +1,6 @@
 {
   "name": "ironrdp-wasm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "WebAssembly build of Marc-André Moreau's IronRDP library for web RDP clients",
   "keywords": [
     "rdp",
@@ -36,7 +36,7 @@
     "pkg"
   ],
   "scripts": {
-    "build": "wasm-pack build --target web --out-dir pkg --release",
+    "build": "node bin/build.js",
     "example": "cd example && node server.js"
   }
 }
