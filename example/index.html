@@ -393,7 +393,7 @@
                 const desktopSize = new DesktopSize(1280, 720);
 
                 // Disable CredSSP since we don't have a Kerberos/NTLM implementation in WASM
-                const enableCredsspExt = new Extension('enable_credssp', false);
+                const enableCredsspExt = new Extension('enable_credssp', true);
 
                 const builder = new SessionBuilder();
                 builder.username(username);
