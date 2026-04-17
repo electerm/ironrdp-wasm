@@ -120,6 +120,84 @@
             cursor: pointer;
         }
         #fullscreen-btn:hover { background: #30363d; color: #e0e0e0; }
+
+        /* File transfer panel */
+        #file-transfer-panel {
+            background: #16213e;
+            border-top: 1px solid #0f3460;
+            padding: 12px 16px;
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+        #file-transfer-panel.visible { display: flex; }
+        .ft-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .ft-header h3 {
+            font-size: 14px;
+            color: #e94560;
+            margin: 0;
+        }
+        .ft-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .ft-btn {
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: none;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            background: #533483;
+            color: white;
+        }
+        .ft-btn:hover { background: #6b44a0; }
+        .ft-btn:disabled { background: #555; cursor: not-allowed; }
+        .ft-btn.primary { background: #e94560; }
+        .ft-btn.primary:hover { background: #c73e54; }
+
+        #file-list {
+            max-height: 150px;
+            overflow-y: auto;
+            background: #0d1117;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            padding: 8px;
+        }
+        .ft-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 8px;
+            border-bottom: 1px solid #21262d;
+            font-size: 12px;
+        }
+        .ft-item:last-child { border-bottom: none; }
+        .ft-item-name { flex: 1; color: #8b949e; }
+        .ft-item-size { color: #6e7681; margin: 0 12px; }
+        .ft-item-status { color: #3fb950; font-weight: 600; }
+        .ft-item-status.downloading { color: #ffc107; }
+        .ft-item-status.error { color: #f85149; }
+
+        .ft-drop-zone {
+            border: 2px dashed #0f3460;
+            border-radius: 4px;
+            padding: 16px;
+            text-align: center;
+            color: #6e7681;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        .ft-drop-zone.dragover {
+            border-color: #e94560;
+            background: rgba(233, 69, 96, 0.1);
+            color: #e94560;
+        }
     </style>
 </head>
 <body>
@@ -138,6 +216,21 @@
         <canvas id="rdp-screen" width="1280" height="720" tabindex="0"></canvas>
     </div>
 
+    <div id="file-transfer-panel">
+        <div class="ft-header">
+            <h3>📁 File Transfer</h3>
+            <div class="ft-actions">
+                <button class="ft-btn" id="upload-btn" disabled>Upload Files</button>
+                <button class="ft-btn primary" id="download-btn" disabled>Request Download</button>
+                <input type="file" id="file-input" multiple style="display: none;">
+            </div>
+        </div>
+        <div class="ft-drop-zone" id="drop-zone">
+            Drag & drop files here to upload to remote desktop
+        </div>
+        <div id="file-list"></div>
+    </div>
+
     <div id="log-panel"></div>
 
     <script type="module">
@@ -149,6 +242,7 @@
             InputTransaction,
             DeviceEvent,
             Extension,
+            ClipboardData,
         } from '../pkg/rdp_client.js';
 
         // ── DOM Elements ──
@@ -162,9 +256,20 @@
         const passwordInput = document.getElementById('password');
         const canvas = document.getElementById('rdp-screen');
         const canvasContainer = document.getElementById('canvas-container');
+        const fileTransferPanel = document.getElementById('file-transfer-panel');
+        const uploadBtn = document.getElementById('upload-btn');
+        const downloadBtn = document.getElementById('download-btn');
+        const fileInput = document.getElementById('file-input');
+        const dropZone = document.getElementById('drop-zone');
+        const fileListEl = document.getElementById('file-list');
 
         let session = null;
         let wasmInitialized = false;
+        let fileTransferEnabled = false;
+        let clipboardReady = false;
+        let pendingDownloads = new Map();
+        let uploadQueue = [];
+        let uploadedFiles = new Map();
 
         // ── Logging ──
         function log(message, type = 'info') {
@@ -365,6 +470,244 @@
             return e?.message || e?.toString() || String(e);
         }
 
+        // ── File Transfer ──
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function addFileToList(name, size, status = 'queued') {
+            const item = document.createElement('div');
+            item.className = 'ft-item';
+            item.innerHTML = `
+                <span class="ft-item-name">${escapeHtml(name)}</span>
+                <span class="ft-item-size">${formatFileSize(size)}</span>
+                <span class="ft-item-status">${status}</span>
+            `;
+            fileListEl.appendChild(item);
+            fileListEl.scrollTop = fileListEl.scrollHeight;
+            return item;
+        }
+
+        function updateFileStatus(itemEl, status, isError = false) {
+            const statusEl = itemEl.querySelector('.ft-item-status');
+            statusEl.textContent = status;
+            statusEl.className = 'ft-item-status' + (isError ? ' error' : status === 'downloading' ? ' downloading' : '');
+        }
+
+        function setupFileTransferCallbacks(builder) {
+            fileTransferEnabled = true;
+
+            // Register file transfer callback extensions at build time
+            const filesAvailableCallback = new Extension('files_available_callback', (files, clipDataId) => {
+                log(`Remote clipboard has ${files.length} file(s) available`, 'success');
+                pendingDownloads = new Map(files.map((f, i) => [i, f]));
+                downloadBtn.disabled = false;
+
+                files.forEach((fileInfo, index) => {
+                    addFileToList(fileInfo.name || `file_${index}`, fileInfo.fileSize || 0, 'available');
+                });
+            });
+            builder.extension(filesAvailableCallback);
+
+            const fileContentsRequestCallback = new Extension('file_contents_request_callback', async (request) => {
+                log(`Remote requesting file contents: streamId=${request.streamId}, index=${request.index}, flags=${request.flags}`, 'info');
+
+                const file = uploadedFiles.get(request.index);
+                if (!file) {
+                    log(`File not found for index=${request.index}`, 'error');
+                    session.invokeExtension(new Extension('submit_file_contents', {
+                        stream_id: request.streamId,
+                        is_error: true,
+                        data: new Uint8Array(0),
+                    }));
+                    return;
+                }
+
+                try {
+                    if (request.flags & 0x00000001) {
+                        // FILECONTENTS_SIZE - return 8-byte little-endian u64 file size
+                        const sizeBytes = new Uint8Array(8);
+                        const view = new DataView(sizeBytes.buffer);
+                        view.setBigUint64(0, BigInt(file.size), true);
+                        log(`Sending file size: ${file.size} bytes`, 'info');
+                        session.invokeExtension(new Extension('submit_file_contents', {
+                            stream_id: request.streamId,
+                            is_error: false,
+                            data: sizeBytes,
+                        }));
+                    } else if (request.flags & 0x00000002) {
+                        // FILECONTENTS_DATA - return file content range
+                        const start = request.position;
+                        const length = request.size;
+                        const blob = file.slice(start, start + length);
+                        const buffer = await blob.arrayBuffer();
+                        const data = new Uint8Array(buffer);
+                        log(`Sending file data: ${data.length} bytes (offset=${start})`, 'info');
+                        session.invokeExtension(new Extension('submit_file_contents', {
+                            stream_id: request.streamId,
+                            is_error: false,
+                            data: data,
+                        }));
+                    }
+                } catch (e) {
+                    log(`Failed to read file: ${formatError(e)}`, 'error');
+                    session.invokeExtension(new Extension('submit_file_contents', {
+                        stream_id: request.streamId,
+                        is_error: true,
+                        data: new Uint8Array(0),
+                    }));
+                }
+            });
+            builder.extension(fileContentsRequestCallback);
+
+            const fileContentsResponseCallback = new Extension('file_contents_response_callback', (response) => {
+                log(`File contents response: streamId=${response.streamId}, size=${response.data.length}`, 'info');
+                // Handle file content responses
+            });
+            builder.extension(fileContentsResponseCallback);
+
+            const lockCallback = new Extension('lock_callback', (dataId) => {
+                log(`Clipboard locked: dataId=${dataId}`, 'info');
+            });
+            builder.extension(lockCallback);
+
+            const unlockCallback = new Extension('unlock_callback', (dataId) => {
+                log(`Clipboard unlocked: dataId=${dataId}`, 'info');
+            });
+            builder.extension(unlockCallback);
+
+            const locksExpiredCallback = new Extension('locks_expired_callback', (clipDataIds) => {
+                log(`Clipboard locks expired: ${clipDataIds.length} lock(s)`, 'warn');
+            });
+            builder.extension(locksExpiredCallback);
+
+            log('File transfer callbacks registered (via CLIPRDR channel)', 'success');
+        }
+
+        function setupFileTransferUI() {
+            uploadBtn.addEventListener('click', () => {
+                fileInput.click();
+            });
+
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    handleFilesUpload(Array.from(e.target.files));
+                }
+            });
+
+            downloadBtn.addEventListener('click', () => {
+                handleFileDownload();
+            });
+
+            dropZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                dropZone.classList.add('dragover');
+            });
+
+            dropZone.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('dragover');
+            });
+
+            dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('dragover');
+                if (e.dataTransfer.files.length > 0) {
+                    handleFilesUpload(Array.from(e.dataTransfer.files));
+                }
+            });
+        }
+
+        async function handleFilesUpload(files) {
+            if (!session || !fileTransferEnabled) {
+                log('File transfer not available', 'error');
+                return;
+            }
+
+            if (!clipboardReady) {
+                log('Waiting for clipboard channel to be ready...', 'info');
+                await new Promise(resolve => {
+                    const checkReady = () => {
+                        if (clipboardReady) {
+                            resolve();
+                        } else {
+                            setTimeout(checkReady, 200);
+                        }
+                    };
+                    checkReady();
+                });
+                log('Clipboard channel ready', 'success');
+            }
+
+            log(`Uploading ${files.length} file(s) to remote desktop...`);
+
+            try {
+                const fileDescriptors = files.map((file, index) => {
+                    uploadedFiles.set(index, file);
+                    return {
+                        name: file.name,
+                        size: file.size,
+                        lastModified: file.lastModified,
+                    };
+                });
+
+                const initiateFileCopyExt = new Extension('initiate_file_copy', fileDescriptors);
+                session.invokeExtension(initiateFileCopyExt);
+
+                log(`Initiated file copy for ${files.length} file(s)`, 'success');
+
+                files.forEach((file, index) => {
+                    const itemEl = addFileToList(file.name, file.size, 'uploading');
+                    updateFileStatus(itemEl, 'uploaded');
+                    log(`✓ Prepared ${file.name} for upload`, 'success');
+                });
+            } catch (err) {
+                const errorMsg = formatError(err);
+                log(`✗ Failed to initiate file copy: ${errorMsg}`, 'error');
+                console.error('Upload error details:', err);
+            }
+        }
+
+        function handleFileDownload() {
+            if (!session || !fileTransferEnabled) {
+                log('File transfer not available', 'error');
+                return;
+            }
+
+            if (pendingDownloads.size === 0) {
+                log('No files available for download. Files will appear when remote clipboard has content.', 'info');
+                return;
+            }
+
+            log(`Requesting ${pendingDownloads.size} file(s) from remote desktop...`, 'info');
+
+            pendingDownloads.forEach((fileInfo, index) => {
+                const itemEl = addFileToList(fileInfo.name || `file_${index}`, fileInfo.fileSize || 0, 'downloading');
+
+                try {
+                    const requestFileContentsExt = new Extension('request_file_contents', {
+                        stream_id: index + 1,
+                        file_index: index,
+                        flags: 0x00000002,
+                        position: 0,
+                        size: fileInfo.fileSize || 0,
+                    });
+
+                    session.invokeExtension(requestFileContentsExt);
+                    log(`Requested file: ${fileInfo.name || `file_${index}`}`, 'info');
+                } catch (err) {
+                    updateFileStatus(itemEl, 'failed', true);
+                    const errorMsg = formatError(err);
+                    log(`✗ Failed to request ${fileInfo.name || `file_${index}`}: ${errorMsg}`, 'error');
+                    console.error('Download error details:', err);
+                }
+            });
+        }
+
         // ── Connect ──
         async function connect() {
             try {
@@ -405,7 +748,52 @@
                 builder.renderCanvas(canvas);
                 builder.extension(enableCredsspExt);
 
-                // Cursor style callback
+                setupFileTransferCallbacks(builder);
+
+                // Register clipboard callbacks (required for CLIPRDR channel to be enabled)
+                builder.remoteClipboardChangedCallback((clipboardData) => {
+                    clipboardReady = true;
+                    try {
+                        if (clipboardData.isEmpty()) {
+                            log('Remote clipboard cleared', 'info');
+                            return;
+                        }
+                        const items = clipboardData.items();
+                        const mimeTypes = items.map(item => item.mimeType()).join(', ');
+                        log(`Remote clipboard changed: ${mimeTypes}`, 'info');
+                    } catch (e) {
+                        log(`Clipboard error: ${formatError(e)}`, 'error');
+                    }
+                });
+
+                builder.forceClipboardUpdateCallback(async () => {
+                    if (clipboardReady) {
+                        // Already initialized, skip
+                        return;
+                    }
+                    clipboardReady = true;
+                    log('Clipboard channel ready (CLIPRDR initialized)', 'success');
+                    // Sync local clipboard to remote to complete channel initialization
+                    try {
+                        const text = await navigator.clipboard.readText();
+                        if (text) {
+                            const data = new ClipboardData();
+                            data.addText('text/plain', text);
+                            await session.onClipboardPaste(data);
+                            log('Local clipboard synced to remote', 'info');
+                        } else {
+                            // Send empty clipboard to trigger initiate_copy and transition to Ready state
+                            const data = new ClipboardData();
+                            await session.onClipboardPaste(data);
+                        }
+                    } catch (e) {
+                        // Clipboard read may fail due to permissions, send empty clipboard anyway
+                        log(`Clipboard read failed, sending empty clipboard: ${formatError(e)}`, 'info');
+                        const data = new ClipboardData();
+                        await session.onClipboardPaste(data);
+                    }
+                });
+
                 builder.setCursorStyleCallbackContext(canvas);
                 builder.setCursorStyleCallback(function(style) {
                     canvas.style.cursor = style || 'default';
@@ -422,6 +810,12 @@
                 setStatus(`Connected (${ds.width}×${ds.height})`, 'connected');
                 disconnectBtn.disabled = false;
                 canvas.focus();
+
+                if (fileTransferEnabled) {
+                    fileTransferPanel.classList.add('visible');
+                    uploadBtn.disabled = false;
+                    log('File transfer panel enabled', 'success');
+                }
 
                 // Run the session event loop
                 session.run().then((info) => {
@@ -440,9 +834,17 @@
 
         function cleanup() {
             session = null;
+            clipboardReady = false;
+            uploadedFiles.clear();
             setStatus('Disconnected', 'disconnected');
             connectBtn.disabled = false;
             disconnectBtn.disabled = true;
+            fileTransferPanel.classList.remove('visible');
+            uploadBtn.disabled = true;
+            downloadBtn.disabled = true;
+            fileListEl.innerHTML = '';
+            pendingDownloads.clear();
+            uploadQueue = [];
         }
 
         function disconnect() {
@@ -479,7 +881,9 @@
 
         // ── Initialize ──
         setupInputHandlers();
+        setupFileTransferUI();
         log('IronRDP Web Client ready. Click Connect to start.');
+        log('File transfer support will be enabled after connecting if server supports it.', 'info');
     </script>
 </body>
 </html>
