@@ -13,16 +13,13 @@ expressWs(app);
 
 // ── Static file serving ──
 
+app.use(express.static(ROOT));
+
 app.use('/pkg', express.static(path.join(ROOT, '..', 'pkg'), {
     setHeaders(res, filePath) {
         if (filePath.endsWith('.wasm')) res.setHeader('Content-Type', 'application/wasm');
     },
 }));
-
-// Root → index.html
-app.get('/', (_req, res) => {
-    res.sendFile(path.join(ROOT, 'index.html'));
-});
 
 // ── WebSocket RDCleanPath proxy ──
 // The WASM client connects to ws://<host>:<port>/
