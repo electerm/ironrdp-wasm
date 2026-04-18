@@ -1,141 +1,161 @@
+<div align="center">
+
 # IronRDP WASM
 
-This project compiles [Marc-André Moreau's IronRDP](https://github.com/Devolutions/IronRDP) Web client to WebAssembly (WASM) for use in web projects. It provides a JavaScript module that can be imported into web applications to enable RDP connectivity.
+[![English](https://img.shields.io/badge/English-README-blue)](README.md)
+[![中文](https://img.shields.io/badge/中文-说明-red)](README.zh-CN.md)
 
-## What it is
+WebAssembly build of [IronRDP](https://github.com/Devolutions/IronRDP) for browser-based RDP clients.
 
-- **ironrdp-wasm** is a WebAssembly build of the [IronRDP](https://github.com/Devolutions/IronRDP) library, specifically the `ironrdp-web` crate created by Marc-André Moreau.
-- This package simply compiles the existing IronRDP Rust code to WebAssembly - **all credit for the RDP implementation goes to the original IronRDP project**.
-- It allows web applications to connect to RDP servers directly from the browser.
-- Combined with `lib/rdp-proxy.js` (now in the example folder), it provides a complete RDP client solution for web.
+</div>
 
-## Installation
+## Features
+
+- **RDP Connection** - Connect to RDP servers directly from the browser
+- **Input Handling** - Keyboard, mouse, and wheel support with PS/2 Set 1 scancode mapping
+- **Clipboard Sync** - Text clipboard synchronization between local and remote
+- **File Transfer** - Upload and download files via CLIPRDR channel
+  - Drag & drop or file picker to upload files to remote desktop
+  - Download files copied on remote server explorer
+- **WebSocket Proxy** - Example proxy server (`example/lib/rdp-proxy.js`) for RDCleanPath protocol
+
+## Quick Start
 
 ```bash
-npm install ironrdp-wasm
+npm install
+npm run build
+npm run example
+```
+
+Open http://localhost:8080 in your browser.
+
+## Project Structure
+
+```
+ironrdp-wasm/
+├── src/
+│   └── lib.rs              # Rust WASM bindings
+├── pkg/                    # Build output (generated)
+│   ├── rdp_client.js       # JavaScript bindings
+│   ├── rdp_client_bg.wasm  # Compiled WebAssembly
+│   └── rdp_client.d.ts     # TypeScript definitions
+├── example/
+│   ├── index.html          # Demo RDP client UI
+│   ├── style.css           # Styles
+│   ├── server.js           # HTTP + WebSocket proxy server
+│   └── lib/
+│       ├── logger.js       # Logging and status utilities
+│       ├── input.js        # Keyboard/mouse input handlers
+│       ├── clipboard.js    # Clipboard synchronization
+│       ├── file-transfer.js # File upload/download via CLIPRDR
+│       ├── session.js      # Session manager (ties everything together)
+│       └── rdp-proxy.js    # WebSocket RDCleanPath proxy
+├── Cargo.toml
+└── package.json
+```
+
+## Prerequisites
+
+### Rust Toolchain
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup target add wasm32-unknown-unknown
+```
+
+### wasm-pack
+
+```bash
+cargo install wasm-pack
+```
+
+### Node.js
+
+Node.js 16+ from [nodejs.org](https://nodejs.org/) or via [nvm](https://github.com/nvm-sh/nvm).
+
+## Building
+
+```bash
+npm install
+npm run build
+```
+
+This runs `wasm-pack build --target web --out-dir pkg --release`, producing:
+- `pkg/rdp_client.js` - JavaScript bindings
+- `pkg/rdp_client_bg.wasm` - Compiled WebAssembly
+- `pkg/rdp_client.d.ts` - TypeScript definitions
+
+For debug builds:
+```bash
+wasm-pack build --target web --out-dir pkg --dev
 ```
 
 ## Usage
 
 ```javascript
-import { init, SessionBuilder } from 'ironrdp-wasm';
+import init, {
+    SessionBuilder,
+    DesktopSize,
+    Extension,
+    DeviceEvent,
+    InputTransaction,
+    ClipboardData,
+} from 'ironrdp-wasm';
 
-// Initialize the WASM module
 await init();
 
-// Create a session
-const session = new SessionBuilder()
-  .withUsername('user')
-  .withPassword('pass')
-  .withDomain('domain')
-  .withHost('rdp-server.example.com')
-  .build();
+const builder = new SessionBuilder();
+builder.username('user');
+builder.password('pass');
+builder.destination('rdp-server:3389');
+builder.proxyAddress('ws://localhost:8080');
+builder.desktopSize(new DesktopSize(1280, 720));
+builder.renderCanvas(canvasElement);
 
-// Connect
-await session.connect();
+const session = await builder.connect();
+session.run();
 ```
 
-## Prerequisites
+### Extensions
 
-Before building this project, ensure you have the following installed:
+IronRDP uses an extension system for optional features:
 
-### Rust Toolchain
-Install Rust using [rustup](https://rustup.rs/):
+```javascript
+// Enable CredSSP
+builder.extension(new Extension('enable_credssp', true));
+
+// File transfer callbacks
+builder.extension(new Extension('files_available_callback', (files, clipDataId) => {
+    // Remote has files available for download
+}));
+
+// Clipboard callbacks
+builder.remoteClipboardChangedCallback((clipboardData) => {
+    // Remote clipboard changed
+});
+
+builder.forceClipboardUpdateCallback(() => {
+    // Sync local clipboard to remote
+});
+```
+
+## Example Application
+
+The `example/` folder contains a complete demo with:
+- Modern dark-themed UI with connection bar, canvas, log panel, and file transfer panel
+- Modular JavaScript architecture (`logger.js`, `input.js`, `clipboard.js`, `file-transfer.js`, `session.js`)
+- WebSocket proxy server for RDCleanPath protocol
+
+To run:
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cd example && npm install && cd ..
+npm run build
+npm run example
 ```
-
-Add the WebAssembly target:
-```bash
-rustup target add wasm32-unknown-unknown
-```
-
-### wasm-pack
-Install `wasm-pack` for building Rust-generated WebAssembly packages:
-```bash
-cargo install wasm-pack
-```
-
-### Node.js and npm
-Install Node.js (version 16 or later) from [nodejs.org](https://nodejs.org/) or using a version manager like [nvm](https://github.com/nvm-sh/nvm).
-
-## Building
-
-To build the WASM module from source:
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/electerm/ironrdp-wasm.git
-   cd ironrdp-wasm
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
-
-3. **Build the WASM module:**
-   ```bash
-   npm run build
-   ```
-
-This command runs `wasm-pack build --target web --out-dir pkg --release`, which:
-- Compiles the Rust code in `src/lib.rs` to WebAssembly
-- Generates JavaScript bindings in the `pkg/` directory
-- Optimizes the WASM binary for production
-
-The build output will be in the `pkg/` folder, containing:
-- `rdp_client.js` - JavaScript bindings
-- `rdp_client_bg.wasm` - The compiled WebAssembly module
-- `rdp_client.d.ts` - TypeScript definitions
-
-## Development
-
-For development builds (with debug symbols):
-```bash
-wasm-pack build --target web --out-dir pkg --dev
-```
-
-To clean the build:
-```bash
-rm -rf pkg/
-```
-
-## Example
-
-See the `example/` folder for a complete demo application that includes:
-- A web-based RDP client UI (`index.html`)
-- A WebSocket proxy server (`server.js`) for handling RDP connections
-- Proxy utilities (`lib/rdp-proxy.js`)
-
-To run the example:
-
-1. **Install example dependencies:**
-   ```bash
-   cd example
-   npm install
-   cd ..
-   ```
-
-2. **Build the WASM module (if not already built):**
-   ```bash
-   npm run build
-   ```
-
-3. **Start the example server:**
-   ```bash
-   npm run example
-   ```
-
-Then open http://localhost:8080 in your browser.
-
-## API
-
-The module exports all functions and classes from the IronRDP Web API. Refer to the IronRDP documentation for detailed API reference.
 
 ## Credits
 
-This package is a WebAssembly compilation of [Marc-André Moreau's IronRDP library](https://github.com/Devolutions/IronRDP). All RDP protocol implementation and core functionality is from the original IronRDP project. This package simply provides the build tooling and JavaScript bindings to make IronRDP available for web projects.
+This package is a WebAssembly compilation of [Marc-André Moreau's IronRDP library](https://github.com/Devolutions/IronRDP). All RDP protocol implementation and core functionality is from the original IronRDP project. This package provides the build tooling and JavaScript bindings to make IronRDP available for web projects.
 
 ## License
 
