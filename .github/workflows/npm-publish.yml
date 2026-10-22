@@ -89,7 +89,12 @@ jobs:
         with:
           # Node 24 bundles npm >= 11.5.1, the minimum for trusted publishing.
           node-version: '24'
-          registry-url: https://registry.npmjs.org/
+          # NO `registry-url` on purpose. With it, setup-node writes
+          # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into .npmrc and
+          # exports NODE_AUTH_TOKEN as the placeholder `XXXXX-XXXXX-...`. npm then
+          # takes the token path, rejects the placeholder and fails with ENEEDAUTH
+          # *instead of* doing the OIDC trusted-publishing exchange. The default
+          # registry is npmjs anyway, so leaving it out is what makes OIDC work.
 
       # No `npm ci` here on purpose: the package has no dependencies of its own
       # (bin/build.js only uses node builtins), and package-lock.json is out of
@@ -155,7 +160,34 @@ jobs:
           # package.json — show what would actually ship.
           npm pack --dry-run
 
+      - name: Check OIDC availability
+        # Trusted publishing cannot work without the OIDC request URL. Fail here
+        # with a readable message instead of a bare ENEEDAUTH from npm.
+        run: |
+          set -eu
+          echo "npm $(npm --version)"
+          echo "registry: $(npm config get registry)"
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::ACTIONS_ID_TOKEN_REQUEST_URL is missing — is 'permissions: id-token: write' still set?"
+            exit 1
+          fi
+          # A token in .npmrc makes npm take the token path instead of the OIDC
+          # exchange. Values are never printed, just the fact that one exists.
+          if [ -f "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}" ] &&
+             grep -q "_authToken" "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"; then
+            echo "::warning::.npmrc has an _authToken entry — npm may ignore OIDC because of it"
+          fi
+
       - name: Publish
-        # Belt and braces: this also compares against the registry and no-ops if
-        # the version appeared between the `check` job and now.
-        run: npx --yes @jsdevtools/npm-publish --access public --provenance
+        # `npm publish` itself performs the OIDC exchange (npm >= 11.5.1) and
+        # attaches provenance. Re-check the registry first: the version may have
+        # appeared between the `check` job and now.
+        run: |
+          set -eu
+          pkg="$(node -p "require('./package.json').name")"
+          ver="$(node -p "require('./package.json').version")"
+          if npm view "$pkg@$ver" version >/dev/null 2>&1; then
+            echo "$pkg@$ver appeared on npm in the meantime — nothing to publish."
+            exit 0
+          fi
+          npm publish --access public --provenance

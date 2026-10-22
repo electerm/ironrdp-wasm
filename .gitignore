@@ -43,3 +43,4 @@ Thumbs.db
 .ironrdp/
 # Scratch crate the build actually runs in
 .build/
+.workbuddy
