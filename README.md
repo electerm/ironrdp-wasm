@@ -85,10 +85,25 @@ This runs `wasm-pack build --target web --out-dir pkg --release`, producing:
 - `pkg/rdp_client_bg.wasm` - Compiled WebAssembly
 - `pkg/rdp_client.d.ts` - TypeScript definitions
 
+`npm run build` first materializes the IronRDP checkout the package is built
+from: it downloads the revision pinned in `bin/prepare-ironrdp.js` into
+`.ironrdp/` (gitignored) and applies the patches in `patches/` (see
+[patches/README.md](patches/README.md) for what they change and why). The crate
+is then compiled from a scratch copy in `.build/` (gitignored) whose manifest
+points at that checkout, so no tracked file is modified and an interrupted build
+cannot leave the working tree in a broken state. Deleting `.ironrdp/` forces a
+clean re-fetch.
+
+Note that the patched checkout carries its own `rust-toolchain.toml`, so the
+toolchain version IronRDP pins is the one used.
+
 For debug builds:
 ```bash
 wasm-pack build --target web --out-dir pkg --dev
 ```
+
+(That skips the patch step - use it only for a quick look at unpatched
+upstream.)
 
 ## Usage
 

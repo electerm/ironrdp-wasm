@@ -1,0 +1,268 @@
+--- a/crates/ironrdp-web/src/session.rs
++++ b/crates/ironrdp-web/src/session.rs
+@@ -1,6 +1,8 @@
+-use core::cell::RefCell;
++use core::cell::{Cell, RefCell};
+ use core::net::{Ipv4Addr, SocketAddrV4};
+ use core::num::NonZeroU32;
++use core::pin::Pin;
++use core::task::{Context, Poll};
+ use core::time::Duration;
+ use std::borrow::Cow;
+ use std::rc::Rc;
+@@ -9,10 +11,10 @@
+ use base64::Engine as _;
+ use futures_channel::mpsc;
+ use futures_util::io::{ReadHalf, WriteHalf};
+-use futures_util::{AsyncWriteExt as _, FutureExt as _, StreamExt as _, select};
++use futures_util::{AsyncWriteExt as _, FutureExt as _, Stream, StreamExt as _, select};
+ use gloo_net::websocket;
+ use gloo_net::websocket::futures::WebSocket;
+-use gloo_timers::future::IntervalStream;
++use gloo_timers::future::{IntervalStream, TimeoutFuture};
+ use iron_remote_desktop::{CursorStyle, DesktopSize, Extension, IronErrorKind};
+ use ironrdp::cliprdr::CliprdrClient;
+ use ironrdp::cliprdr::backend::ClipboardMessage;
+@@ -23,6 +25,7 @@
+ use ironrdp::displaycontrol::client::DisplayControlClient;
+ use ironrdp::dvc::DrdynvcClient;
+ use ironrdp::graphics::image_processing::PixelFormat;
++use ironrdp::pdu::geometry::InclusiveRectangle;
+ use ironrdp::pdu::input::fast_path::FastPathInputEvent;
+ use ironrdp::pdu::rdp::capability_sets::client_codecs_capabilities;
+ use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+@@ -79,6 +82,7 @@
+ 
+     use_display_control: bool,
+     enable_credssp: bool,
++    enable_server_pointer: bool,
+     outbound_message_size_limit: Option<usize>,
+ }
+ 
+@@ -113,6 +117,7 @@
+ 
+             use_display_control: false,
+             enable_credssp: true,
++            enable_server_pointer: true,
+             outbound_message_size_limit: None,
+         }
+     }
+@@ -230,6 +235,7 @@
+             |kdc_proxy_url: String| { self.0.borrow_mut().kdc_proxy_url = Some(kdc_proxy_url) };
+             |display_control: bool| { self.0.borrow_mut().use_display_control = display_control };
+             |enable_credssp: bool| { self.0.borrow_mut().enable_credssp = enable_credssp };
++            |enable_server_pointer: bool| { self.0.borrow_mut().enable_server_pointer = enable_server_pointer };
+             |outbound_message_size_limit: f64| {
+                 let limit = if outbound_message_size_limit >= 0.0 && outbound_message_size_limit <= f64::from(u32::MAX) {
+                     #[expect(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+@@ -332,6 +338,14 @@
+ 
+         let enable_credssp = self.0.borrow().enable_credssp;
+         config.enable_credssp = enable_credssp;
++
++        // Opt out of server-side pointer updates: the cursor is then drawn by
++        // the frontend (a CSS cursor on the canvas), so it moves at local input
++        // rate instead of waiting for a pointer bitmap to come back through the
++        // graphics pipeline. Under heavy update load the server-side cursor is
++        // the first thing that looks "frozen".
++        let enable_server_pointer = self.0.borrow().enable_server_pointer;
++        config.enable_server_pointer = enable_server_pointer;
+ 
+         let (input_events_tx, input_events_rx) = mpsc::unbounded();
+ 
+@@ -497,9 +511,86 @@
+             .map_err(|e| anyhow::Error::msg(format!("set cursor style callback failed: {e:?}")))?;
+ 
+         Ok(())
++    }
++}
++
++/// Minimum time between two canvas blits. Graphics updates are coalesced into
++/// a single dirty region and painted at most this often.
++const DRAW_INTERVAL_MS: u32 = 16;
++
++/// Upper bound on the number of RDP frames processed between two yields to the
++/// browser event loop.
++const MAX_FRAMES_PER_YIELD: u32 = 16;
++
++/// One-shot ticker used to give a pending paint a deadline.
++///
++/// This is deliberately not an `IntervalStream`: an idle session must not wake
++/// up 60 times per second, so the ticker is armed only while there is
++/// something to paint, and it disarms itself once it fires.
++struct PaintTicker {
++    delay: u32,
++    armed: Rc<Cell<bool>>,
++    deadline: Option<TimeoutFuture>,
++}
++
++/// Handle used to arm a [`PaintTicker`] from inside the session loop, where the
++/// ticker itself is borrowed by the `select!` expression.
++#[derive(Clone)]
++struct PaintTrigger(Rc<Cell<bool>>);
++
++impl PaintTrigger {
++    fn trigger(&self) {
++        self.0.set(true);
+     }
+ }
+ 
++impl PaintTicker {
++    fn new(delay: u32) -> (Self, PaintTrigger) {
++        let armed = Rc::new(Cell::new(false));
++        let trigger = PaintTrigger(armed.clone());
++        let this = Self {
++            delay,
++            armed,
++            deadline: None,
++        };
++        (this, trigger)
++    }
++}
++
++impl Stream for PaintTicker {
++    type Item = ();
++
++    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<()>> {
++        let this = self.get_mut();
++
++        if !this.armed.get() {
++            this.deadline = None;
++            return Poll::Pending;
++        }
++
++        let deadline = this.deadline.get_or_insert_with(|| TimeoutFuture::new(this.delay));
++
++        match Pin::new(deadline).poll(cx) {
++            Poll::Ready(()) => {
++                this.deadline = None;
++                this.armed.set(false);
++                Poll::Ready(Some(()))
++            }
++            Poll::Pending => Poll::Pending,
++        }
++    }
++}
++
++/// Smallest rectangle containing both `a` and `b`.
++fn union_rect(a: InclusiveRectangle, b: InclusiveRectangle) -> InclusiveRectangle {
++    InclusiveRectangle {
++        left: a.left.min(b.left),
++        top: a.top.min(b.top),
++        right: a.right.max(b.right),
++        bottom: a.bottom.max(b.bottom),
++    }
++}
++
+ impl iron_remote_desktop::Session for Session {
+     type SessionTerminationInfo = SessionTerminationInfo;
+     type InputTransaction = InputTransaction;
+@@ -556,14 +647,32 @@
+         // Timer interval for driving clipboard lock timeouts (5 second interval)
+         let mut cleanup_interval = IntervalStream::new(5_000).fuse();
+ 
+-        let disconnect_reason = 'outer: loop {
+-            let outputs = select! {
+-                frame = framed.read_pdu().fuse() => {
+-                    let (action, payload) = frame.context("read frame")?;
+-                    trace!(?action, frame_length = payload.len(), "Frame received");
++        // Painting the screen synchronously for every graphics update is what
++        // makes a busy session (e.g. an AI agent scrolling a terminal on the
++        // remote machine) feel frozen: each `put_image_data` is a synchronous
++        // JS call, and while the loop keeps finding frames to process it never
++        // returns to the browser, so the DOM handlers that produce mouse and
++        // keyboard input never run. Coalescing updates into one dirty region
++        // and yielding periodically fixes both halves of that.
++        let (mut paint_ticker, paint_trigger) = PaintTicker::new(DRAW_INTERVAL_MS);
++        let mut pending_dirty: Option<InclusiveRectangle> = None;
++        let mut frames_since_yield: u32 = 0;
+ 
+-                    active_stage.process(&mut image, action, &payload)?
++        macro_rules! flush_pending_draw {
++            () => {
++                if let Some(region) = pending_dirty.take() {
++                    // PERF: some copies and conversion could be optimized
++                    let (region, buffer) = extract_partial_image(&image, region);
++                    gui.draw(&buffer, region).context("draw updated region")?;
+                 }
++            };
++        }
++
++        let disconnect_reason = 'outer: loop {
++            let outputs = select! {
++                // NOTE: `futures::select!` polls its branches in a random
++                // order, which is what keeps a frame flood from starving the
++                // input branch; the yield below bounds the worst case.
+                 input_events = input_events.next() => {
+                     let event = input_events.context("read next input events")?;
+ 
+@@ -726,6 +835,21 @@
+                         }
+                     }
+                 }
++                frame = framed.read_pdu().fuse() => {
++                    frames_since_yield = frames_since_yield.saturating_add(1);
++
++                    let (action, payload) = frame.context("read frame")?;
++                    trace!(?action, frame_length = payload.len(), "Frame received");
++
++                    active_stage.process(&mut image, action, &payload)?
++                }
++                _ = paint_ticker.next().fuse() => {
++                    // Deadline for a paint that is waiting on a slow trickle of
++                    // updates: coalescing alone would leave the last region
++                    // unpainted until the next frame shows up.
++                    flush_pending_draw!();
++                    Vec::new()
++                }
+                 _ = cleanup_interval.next() => {
+                     // Drive clipboard lock timeout cleanup
+                     if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
+@@ -757,9 +881,15 @@
+                             .context("Send frame to writer task")?;
+                     }
+                     ActiveStageOutput::GraphicsUpdate(region) => {
+-                        // PERF: some copies and conversion could be optimized
+-                        let (region, buffer) = extract_partial_image(&image, region);
+-                        gui.draw(&buffer, region).context("draw updated region")?;
++                        // Coalesce instead of painting inline: the region is
++                        // read back from `image` when the paint actually
++                        // happens, so the union rectangle always shows the
++                        // latest state.
++                        pending_dirty = Some(match pending_dirty {
++                            Some(pending) => union_rect(pending, region),
++                            None => region,
++                        });
++                        paint_trigger.trigger();
+                     }
+                     ActiveStageOutput::PointerDefault => {
+                         self.set_cursor_style(CursorStyle::Default)?;
+@@ -898,6 +1028,10 @@
+                             {
+                                 debug!("Deactivation-Reactivation Sequence completed");
+                                 image = DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
++                                // The framebuffer was replaced: anything still
++                                // queued for painting refers to the previous
++                                // dimensions.
++                                pending_dirty = None;
+                                 // Create a new [`FastPathProcessor`] with potentially updated
+                                 // io/user channel ids.
+                                 active_stage.set_fastpath_processor(
+@@ -929,6 +1063,17 @@
+                     }
+                     ActiveStageOutput::Terminate(reason) => break 'outer reason,
+                 }
++            }
++
++            // Give the browser event loop a turn at least every
++            // MAX_FRAMES_PER_YIELD frames. DOM input handlers, the WebSocket
++            // reader and the paint ticker all run on that loop, so a session
++            // that keeps finding frames to process and never returns to it is
++            // unresponsive no matter how fast it decodes.
++            if frames_since_yield >= MAX_FRAMES_PER_YIELD {
++                frames_since_yield = 0;
++                flush_pending_draw!();
++                TimeoutFuture::new(0).await;
+             }
+         };
+ 

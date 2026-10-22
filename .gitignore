@@ -39,3 +39,7 @@ Thumbs.db
 *.temp
 /temp/
 /pkg
+# Patched IronRDP checkout used by bin/build.js
+.ironrdp/
+# Scratch crate the build actually runs in
+.build/
