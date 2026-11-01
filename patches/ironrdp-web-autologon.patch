@@ -1,0 +1,38 @@
+--- a/crates/ironrdp-web/src/session.rs
++++ b/crates/ironrdp-web/src/session.rs
+@@ -83,6 +83,7 @@ struct SessionBuilderInner {
+     use_display_control: bool,
+     enable_credssp: bool,
+     enable_server_pointer: bool,
++    autologon: bool,
+     outbound_message_size_limit: Option<usize>,
+ }
+ 
+@@ -118,6 +119,7 @@ impl Default for SessionBuilderInner {
+             use_display_control: false,
+             enable_credssp: true,
+             enable_server_pointer: true,
++            autologon: false,
+             outbound_message_size_limit: None,
+         }
+     }
+@@ -236,6 +238,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
+             |display_control: bool| { self.0.borrow_mut().use_display_control = display_control };
+             |enable_credssp: bool| { self.0.borrow_mut().enable_credssp = enable_credssp };
+             |enable_server_pointer: bool| { self.0.borrow_mut().enable_server_pointer = enable_server_pointer };
++            |autologon: bool| { self.0.borrow_mut().autologon = autologon };
+             |outbound_message_size_limit: f64| {
+                 let limit = if outbound_message_size_limit >= 0.0 && outbound_message_size_limit <= f64::from(u32::MAX) {
+                     #[expect(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+@@ -347,6 +350,11 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
+         let enable_server_pointer = self.0.borrow().enable_server_pointer;
+         config.enable_server_pointer = enable_server_pointer;
+ 
++        // Without CredSSP the credentials only reach the server in the Client Info PDU, and Windows
++        // uses the password from there only when INFO_AUTOLOGON is set; otherwise it shows its logon
++        // screen with just the user name filled in.
++        config.autologon = self.0.borrow().autologon;
++
+         let (input_events_tx, input_events_rx) = mpsc::unbounded();
+ 
+         let clipboard = remote_clipboard_changed_callback.clone().map(|callback| {

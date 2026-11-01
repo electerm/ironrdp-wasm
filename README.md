@@ -139,6 +139,9 @@ IronRDP uses an extension system for optional features:
 // Enable CredSSP
 builder.extension(new Extension('enable_credssp', true));
 
+// Log on with the given password without NLA (sets INFO_AUTOLOGON)
+builder.extension(new Extension('autologon', true));
+
 // File transfer callbacks
 builder.extension(new Extension('files_available_callback', (files, clipDataId) => {
     // Remote has files available for download

@@ -33,7 +33,21 @@ export const ROOT = join(here, '..')
 export const CHECKOUT = join(ROOT, '.ironrdp')
 
 const PATCHES = [
-  'patches/ironrdp-web-session-responsiveness.patch'
+  'patches/ironrdp-web-session-responsiveness.patch',
+  'patches/ironrdp-web-autologon.patch'
+]
+
+// sspi (the CredSSP/NTLM implementation IronRDP uses) is a crates.io
+// dependency; a patched copy of the version this revision resolves to is
+// swapped in with `[patch.crates-io]` (see build.js).
+export const SSPI_VERSION = '0.19.2'
+
+const SSPI_URL = `https://static.crates.io/crates/sspi/sspi-${SSPI_VERSION}.crate`
+
+export const SSPI_CHECKOUT = join(ROOT, '.sspi')
+
+const SSPI_PATCHES = [
+  'patches/sspi-upn-credentials.patch'
 ]
 
 const STAMP = join(CHECKOUT, '.build-stamp')
@@ -42,16 +56,44 @@ function sh (cmd, cwd) {
   execSync(cmd, { stdio: 'inherit', cwd })
 }
 
-function fingerprint () {
-  const hash = createHash('sha256').update(IRONRDP_REV)
-  for (const rel of PATCHES) {
+function fingerprint (rev, patches) {
+  const hash = createHash('sha256').update(rev)
+  for (const rel of patches) {
     hash.update(readFileSync(join(ROOT, rel)))
   }
   return hash.digest('hex')
 }
 
+function applyPatches (patches, cwd) {
+  for (const rel of patches) {
+    console.log(`[ironrdp] applying ${rel}`)
+    // --batch: never stop to ask a question (a prompt would hang a CI build)
+    // -N: a patch that does not apply cleanly is an error, not a .rej file
+    sh(`patch -p1 --batch -N < "${join(ROOT, rel)}"`, cwd)
+  }
+}
+
+export function prepareSspi () {
+  const stamp = join(SSPI_CHECKOUT, '.build-stamp')
+  const want = fingerprint(SSPI_VERSION, SSPI_PATCHES)
+
+  if (existsSync(stamp) && readFileSync(stamp, 'utf8').trim() === want) {
+    console.log(`[ironrdp] sspi checkout up to date (${SSPI_VERSION})`)
+    return SSPI_CHECKOUT
+  }
+
+  console.log(`[ironrdp] fetching sspi ${SSPI_VERSION}`)
+  rmSync(SSPI_CHECKOUT, { recursive: true, force: true })
+  mkdirSync(SSPI_CHECKOUT, { recursive: true })
+  sh(`curl -sSL "${SSPI_URL}" | tar xz -C "${SSPI_CHECKOUT}" --strip-components=1`, ROOT)
+  applyPatches(SSPI_PATCHES, SSPI_CHECKOUT)
+
+  writeFileSync(stamp, `${want}\n`)
+  return SSPI_CHECKOUT
+}
+
 export function prepareIronRdp () {
-  const want = fingerprint()
+  const want = fingerprint(IRONRDP_REV, PATCHES)
 
   if (existsSync(STAMP) && readFileSync(STAMP, 'utf8').trim() === want) {
     console.log(`[ironrdp] checkout up to date (${IRONRDP_REV.slice(0, 12)})`)
@@ -63,12 +105,7 @@ export function prepareIronRdp () {
   mkdirSync(CHECKOUT, { recursive: true })
   sh(`curl -sSL "${TARBALL_URL}" | tar xz -C "${CHECKOUT}" --strip-components=1`, ROOT)
 
-  for (const rel of PATCHES) {
-    console.log(`[ironrdp] applying ${rel}`)
-    // --batch: never stop to ask a question (a prompt would hang a CI build)
-    // -N: a patch that does not apply cleanly is an error, not a .rej file
-    sh(`patch -p1 --batch -N < "${join(ROOT, rel)}"`, CHECKOUT)
-  }
+  applyPatches(PATCHES, CHECKOUT)
 
   writeFileSync(STAMP, `${want}\n`)
   return CHECKOUT
@@ -76,4 +113,5 @@ export function prepareIronRdp () {
 
 if (process.argv[1] && process.argv[1].endsWith('prepare-ironrdp.js')) {
   console.log(prepareIronRdp())
+  console.log(prepareSspi())
 }
