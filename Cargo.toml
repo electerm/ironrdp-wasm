@@ -13,5 +13,5 @@ wasm-bindgen = "0.2"
 # actually runs against a patched local checkout of this revision (see
 # bin/prepare-ironrdp.js and patches/). This line is what a plain
 # `cargo build` without the build script would use.
-ironrdp-web = { git = "https://github.com/Devolutions/IronRDP.git", rev = "d0e18e3693f313e83c769fb37fa991965d2a39d3" }
+ironrdp-web = { git = "https://github.com/Devolutions/IronRDP.git", rev = "da016ce860040c6cb37943cfc857d836735d252c" }
 web-sys = { version = "0.3", features = ["console"] }

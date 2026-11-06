@@ -36,10 +36,11 @@ example an AI agent scrolling a terminal on the remote machine):
    not `biased`: that is a `tokio::select!` feature, and biasing the frame
    branch first is exactly the starvation this patch is fixing.) The periodic
    yield above bounds the worst case either way.
-4. **`enable_server_pointer` extension.** The cursor is drawn by the frontend
-   instead of the server. A server-side pointer can only move as fast as the
-   graphics pipeline delivers pointer updates, which is the first thing that
-   looks frozen under load. Pass `false` from the client to enable.
+
+`enable_server_pointer` (the cursor is drawn by the frontend instead of the
+server, so it moves at local input rate) used to be part of this patch; upstream
+took it, so it is gone from here and the client keeps sending it as the
+`enable_server_pointer` extension.
 
 ## Rebuilding the patch
 

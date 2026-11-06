@@ -23,7 +23,7 @@ import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 
 // Pinned upstream revision. Bump this together with the patches.
-export const IRONRDP_REV = 'd0e18e3693f313e83c769fb37fa991965d2a39d3'
+export const IRONRDP_REV = 'da016ce860040c6cb37943cfc857d836735d252c'
 
 const TARBALL_URL =
   `https://codeload.github.com/Devolutions/IronRDP/tar.gz/${IRONRDP_REV}`
