@@ -12,7 +12,7 @@ import {
 } from 'fs'
 import { join } from 'path'
 import { execSync } from 'child_process'
-import { prepareIronRdp, ROOT } from './prepare-ironrdp.js'
+import { prepareIronRdp, prepareSspi, ROOT } from './prepare-ironrdp.js'
 
 // Scratch build directory. The crate is built from a copy here instead of from
 // the repo root so that the tracked Cargo.toml never has to be rewritten: an
@@ -39,6 +39,7 @@ clearDirectory(PKG_DIR)
 // Fetch + patch IronRDP, then build against that checkout instead of the
 // published git dependency.
 const checkout = prepareIronRdp()
+prepareSspi()
 
 // Only the manifest and the sources are rewritten; `target/` is kept so that a
 // rebuild after a source change stays incremental (a cold build of the whole
@@ -56,8 +57,12 @@ if (patchedManifest === manifest) {
 }
 
 // `[workspace]` stops cargo from treating the copy as part of an enclosing
-// workspace (and keeps its lockfile local to the build).
-writeFileSync(join(BUILD_DIR, 'Cargo.toml'), `${patchedManifest}\n\n[workspace]\n`)
+// workspace (and keeps its lockfile local to the build). `[patch.crates-io]`
+// replaces sspi with the patched copy (see prepare-ironrdp.js).
+writeFileSync(
+  join(BUILD_DIR, 'Cargo.toml'),
+  `${patchedManifest}\n\n[workspace]\n\n[patch.crates-io]\nsspi = { path = "../.sspi" }\n`
+)
 
 rmSync(join(BUILD_DIR, 'src'), { recursive: true, force: true })
 cpSync(join(ROOT, 'src'), join(BUILD_DIR, 'src'), { recursive: true })

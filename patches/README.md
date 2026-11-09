@@ -42,6 +42,37 @@ server, so it moves at local input rate) used to be part of this patch; upstream
 took it, so it is gone from here and the client keeps sending it as the
 `enable_server_pointer` extension.
 
+## ironrdp-web-autologon.patch
+
+Target: `crates/ironrdp-web/src/session.rs` (applied after the patch above)
+
+Adds an `autologon` extension (default `false`, as before). Without CredSSP
+(`enable_credssp` set to `false`) the credentials reach the server only in the
+Client Info PDU, and Windows uses the password from there only when
+`INFO_AUTOLOGON` is set; without it the logon screen comes up with just the
+user name filled in. `connector::Config` already has the flag, `ironrdp-web`
+hard-coded it to `false`.
+
+```js
+builder.extension(new Extension('autologon', true))
+```
+
+## sspi-upn-credentials.patch
+
+Target: the `sspi` crate (CredSSP/NTLM), version `SSPI_VERSION` in
+`bin/prepare-ironrdp.js`, file `src/auth_identity.rs`. The build downloads that
+crate into `.sspi/` (gitignored), applies the patch and replaces the
+crates.io version with it through `[patch.crates-io]`.
+
+A user principal name (`user@example.com`) was split into user `user` and
+domain `example.com` when the credentials were handed to NTLM and to the
+delegated `TSPasswordCreds`. The UPN suffix is not a NetBIOS domain, so the
+server's logon for e.g. a Microsoft account failed after NLA: Windows showed
+its logon screen with `user` and a wrong password. The patch keeps the whole
+UPN in `user` with an empty domain, like Windows clients do and like sspi
+does itself since 0.21.3 (IronRDP at the pinned revision uses 0.19). Drop it
+when the pin moves to an IronRDP release with sspi >= 0.21.3.
+
 ## Rebuilding the patch
 
 ```bash

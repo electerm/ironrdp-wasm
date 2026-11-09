@@ -41,6 +41,8 @@ Thumbs.db
 /pkg
 # Patched IronRDP checkout used by bin/build.js
 .ironrdp/
+# Patched sspi crate used by bin/build.js
+.sspi/
 # Scratch crate the build actually runs in
 .build/
 .workbuddy

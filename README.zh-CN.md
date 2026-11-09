@@ -124,6 +124,9 @@ IronRDP 使用扩展系统来支持可选功能：
 // 启用 CredSSP
 builder.extension(new Extension('enable_credssp', true));
 
+// 不使用 NLA 时用给定的密码自动登录（设置 INFO_AUTOLOGON）
+builder.extension(new Extension('autologon', true));
+
 // 文件传输回调
 builder.extension(new Extension('files_available_callback', (files, clipDataId) => {
     // 远程有文件可供下载
