@@ -33,7 +33,8 @@ export const ROOT = join(here, '..')
 export const CHECKOUT = join(ROOT, '.ironrdp')
 
 const PATCHES = [
-  'patches/ironrdp-web-session-responsiveness.patch'
+  'patches/ironrdp-web-session-responsiveness.patch',
+  'patches/ironrdp-web-egfx.patch'
 ]
 
 const STAMP = join(CHECKOUT, '.build-stamp')
