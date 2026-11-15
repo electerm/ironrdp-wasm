@@ -349,10 +349,13 @@ function performRDPHandshake(host, port, x224Request) {
             tcpSocket.removeAllListeners('data');
 
             // Step 4: TLS handshake (accept self-signed certs, as RDP servers typically use them)
+            // Node.js refuses to use an IP address as the TLS servername (SNI), so only
+            // send SNI for real hostnames.
+            const isIpAddress = net.isIP(host) !== 0;
             const tlsSocket = tls.connect(
                 {
                     socket: tcpSocket,
-                    servername: host,
+                    servername: isIpAddress ? undefined : host,
                     rejectUnauthorized: false, // RDP servers use self-signed certs
                 },
                 () => {
