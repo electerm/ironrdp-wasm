@@ -42,6 +42,32 @@ server, so it moves at local input rate) used to be part of this patch; upstream
 took it, so it is gone from here and the client keeps sending it as the
 `enable_server_pointer` extension.
 
+## ironrdp-web-egfx.patch
+
+Target: `crates/ironrdp-web/Cargo.toml`, `crates/ironrdp-web/src/session.rs`
+
+Gives the web client the Graphics Pipeline ([MS-RDPEGFX]):
+
+1. **Channel and early capability.** The client registers the
+   `Microsoft::Windows::RDS::Graphics` dynamic channel and sets
+   `support_dyn_vc_gfx_protocol` in the connector config, so the server sees a
+   client that supports the graphics pipeline. GNOME Remote Desktop (51.x)
+   rejects every other client with "Client did not advertise support for the
+   Graphics Pipeline" during the capability exchange.
+2. **Compositing.** `ironrdp-session` already composites the pipeline's surfaces
+   into the framebuffer and reports the damage as `GraphicsUpdate`, so the
+   session loop needs no new rendering path: the channel handler is a unit struct.
+   No H.264 decoder is configured, so the pipeline advertises capability sets
+   without AVC and the server sends RFX, ClearCodec or uncompressed updates, all
+   of which are decoded in software (no browser decoder is needed).
+3. **Output resets.** A `ResetGraphics` PDU can change the framebuffer size after
+   connecting. The canvas and the reported desktop size follow it, and the first
+   paint after a resize covers the whole surface, since resizing a canvas clears
+   it.
+
+The `legacy_graphics` extension still turns all of this off, including the early
+capability flag, for servers that expect bitmap updates only.
+
 ## Rebuilding the patch
 
 ```bash

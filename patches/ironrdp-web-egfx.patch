@@ -1,0 +1,172 @@
+--- a/crates/ironrdp-web/Cargo.toml
++++ b/crates/ironrdp-web/Cargo.toml
+@@ -40,6 +40,7 @@
+ ] }
+ ironrdp-core.path = "../ironrdp-core"
+ ironrdp-cliprdr-format.path = "../ironrdp-cliprdr-format"
++ironrdp-egfx.path = "../ironrdp-egfx"
+ ironrdp-futures.path = "../ironrdp-futures"
+ ironrdp-pdu.path = "../ironrdp-pdu"
+ ironrdp-rdcleanpath.path = "../ironrdp-rdcleanpath"
+--- a/crates/ironrdp-web/src/session.rs
++++ b/crates/ironrdp-web/src/session.rs
+@@ -43,6 +43,7 @@
+ use ironrdp::session::image::DecodedImage;
+ use ironrdp::session::{ActiveStageBuilder, ActiveStageOutput, GracefulDisconnectReason};
+ use ironrdp_core::WriteBuf;
++use ironrdp_egfx::client::{GraphicsPipelineClient, GraphicsPipelineHandler};
+ use ironrdp_futures::{FramedWrite, single_sequence_step_read};
+ use rgb::AsPixels as _;
+ use tap::prelude::*;
+@@ -54,6 +55,17 @@
+ const DEFAULT_WIDTH: u16 = 1280;
+ const DEFAULT_HEIGHT: u16 = 720;
+ 
++/// Graphics Pipeline ([MS-RDPEGFX]) channel handler.
++///
++/// The session composites the pipeline's surfaces into the framebuffer itself
++/// (`ironrdp_session::composite_graphics_pipeline`), so the per-command
++/// notifications are unused here. No H.264 decoder is configured: the pipeline
++/// then advertises capability sets without AVC, and the server sends RFX,
++/// ClearCodec or uncompressed updates, none of which need a browser decoder.
++struct EgfxHandler;
++
++impl GraphicsPipelineHandler for EgfxHandler {}
++
+ #[derive(Clone, Copy)]
+ struct SecurityConfig {
+     enable_credssp: bool,
+@@ -575,6 +587,7 @@
+             printer_driver_name,
+             computer_name: client_name.clone(),
+             use_display_control,
++            use_graphics_pipeline: !legacy_graphics,
+         })
+         .await?;
+ 
+@@ -587,7 +600,7 @@
+         spawn_local(writer_task(writer_rx, rdp_writer, outbound_message_size_limit));
+ 
+         Ok(Session {
+-            desktop_size: connection_result.desktop_size,
++            desktop_size: Cell::new(connection_result.desktop_size),
+             input_database: RefCell::new(ironrdp::input::Database::new()),
+             writer_tx,
+             input_events_tx,
+@@ -635,7 +648,9 @@
+ }
+ 
+ pub(crate) struct Session {
+-    desktop_size: connector::DesktopSize,
++    /// The framebuffer size, which the graphics pipeline can change after
++    /// connecting (a `ResetGraphics` PDU resizes the output).
++    desktop_size: Cell<connector::DesktopSize>,
+     input_database: RefCell<ironrdp::input::Database>,
+     writer_tx: mpsc::UnboundedSender<Vec<u8>>,
+     input_events_tx: mpsc::UnboundedSender<RdpInputEvent>,
+@@ -821,6 +836,11 @@
+             connection_result.desktop_size.height,
+         );
+ 
++        // The graphics pipeline can reset the output to dimensions other than the
++        // ones negotiated at connect time, so the canvas follows the framebuffer.
++        let mut canvas_width = image.width();
++        let mut canvas_height = image.height();
++
+         let mut requested_resize = None;
+ 
+         // Reused across frames so per-region extraction doesn't allocate on every draw.
+@@ -1306,6 +1326,30 @@
+                 }
+             }
+ 
++            // A ResetGraphics PDU resizes the framebuffer inside the session. The
++            // canvas cannot follow on its own: resizing it clears it, so the next
++            // paint has to cover the whole surface.
++            if image.width() != canvas_width || image.height() != canvas_height {
++                canvas_width = image.width();
++                canvas_height = image.height();
++
++                let width = NonZeroU32::new(u32::from(canvas_width)).context("desktop width is zero")?;
++                let height = NonZeroU32::new(u32::from(canvas_height)).context("desktop height is zero")?;
++
++                gui.resize(width, height);
++                self.desktop_size.set(connector::DesktopSize {
++                    width: canvas_width,
++                    height: canvas_height,
++                });
++                pending_dirty = Some(InclusiveRectangle {
++                    left: 0,
++                    top: 0,
++                    right: canvas_width.saturating_sub(1),
++                    bottom: canvas_height.saturating_sub(1),
++                });
++                paint_trigger.trigger();
++            }
++
+             // Give the browser event loop a turn at least every
+             // MAX_FRAMES_PER_YIELD frames. DOM input handlers, the WebSocket
+             // reader and the paint ticker all run on that loop, so a session
+@@ -1326,9 +1370,10 @@
+     }
+ 
+     fn desktop_size(&self) -> DesktopSize {
++        let desktop_size = self.desktop_size.get();
+         DesktopSize {
+-            width: self.desktop_size.width,
+-            height: self.desktop_size.height,
++            width: desktop_size.width,
++            height: desktop_size.height,
+         }
+     }
+ 
+@@ -1718,7 +1763,9 @@
+         request_data: None,
+         pointer_software_rendering: false,
+         multitransport_flags: None,
+-        support_dyn_vc_gfx_protocol: false,
++        // Tells the server the Graphics Pipeline is available. Some servers
++        // (GNOME Remote Desktop) refuse clients that do not advertise it.
++        support_dyn_vc_gfx_protocol: !legacy_graphics,
+         rdp_version: ironrdp::pdu::gcc::RdpVersion::V5_PLUS,
+         performance_flags: PerformanceFlags::default(),
+         desktop_scale_factor: 0,
+@@ -1792,6 +1839,7 @@
+     /// `computer_name` when constructing the `Rdpdr` processor.
+     computer_name: String,
+     use_display_control: bool,
++    use_graphics_pipeline: bool,
+ }
+ 
+ fn default_printer_driver_name() -> String {
+@@ -1842,6 +1890,7 @@
+         printer_driver_name,
+         computer_name,
+         use_display_control,
++        use_graphics_pipeline,
+     }: ConnectParams,
+ ) -> Result<(connector::ConnectionResult, WebSocket), IronError> {
+     let mut framed = ironrdp_futures::LocalFuturesFramed::new(ws);
+@@ -1869,10 +1918,18 @@
+         );
+     }
+ 
+-    if use_display_control {
+-        connector.attach_static_channel(
+-            DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new()))),
+-        );
++    if use_display_control || use_graphics_pipeline {
++        let mut drdynvc = DrdynvcClient::new();
++
++        if use_graphics_pipeline {
++            drdynvc = drdynvc.with_dynamic_channel(GraphicsPipelineClient::new(Box::new(EgfxHandler), None));
++        }
++
++        if use_display_control {
++            drdynvc = drdynvc.with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new())));
++        }
++
++        connector.attach_static_channel(drdynvc);
+     }
+ 
+     let kerberos_config = url::Url::parse(kdc_proxy_url.unwrap_or_default().as_str())
